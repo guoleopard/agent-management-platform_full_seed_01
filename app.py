@@ -1,13 +1,28 @@
 from flask import Flask, request, jsonify
-from models import db, Agent, AgentLog
+from models import db, Agent, AgentLog, Conversation, Message
 from datetime import datetime
 import os
+import requests
+import uuid
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 # 创建 Flask 应用
 app = Flask(__name__)
 
 # 配置数据库
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(os.path.dirname(__file__), 'db.sqlite3')
+DB_TYPE = os.getenv('DB_TYPE', 'sqlite')
+if DB_TYPE == 'mysql':
+    DB_HOST = os.getenv('DB_HOST', 'localhost')
+    DB_PORT = os.getenv('DB_PORT', '3306')
+    DB_NAME = os.getenv('DB_NAME', 'agent_platform')
+    DB_USER = os.getenv('DB_USER', 'root')
+    DB_PASSWORD = os.getenv('DB_PASSWORD', '')
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(os.path.dirname(__file__), 'db.sqlite3')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # 初始化数据库
@@ -41,7 +56,13 @@ def create_agent():
         agent = Agent(
             name=data['name'],
             description=data.get('description', ''),
-            status=data.get('status', 'inactive')
+            status=data.get('status', 'inactive'),
+            model_name=data.get('model_name', 'llama2'),
+            model_provider=data.get('model_provider', 'ollama'),
+            model_api_url=data.get('model_api_url', 'http://localhost:11434/v1'),
+            model_api_key=data.get('model_api_key'),
+            model_temperature=data.get('model_temperature', 0.7),
+            model_max_tokens=data.get('model_max_tokens', 2048)
         )
         
         # 添加到数据库
@@ -115,6 +136,18 @@ def update_agent(agent_id):
             if data['status'] not in valid_statuses:
                 return jsonify({'error': f'Invalid status. Must be one of {valid_statuses}'}), 400
             agent.status = data['status']
+        if 'model_name' in data:
+            agent.model_name = data['model_name']
+        if 'model_provider' in data:
+            agent.model_provider = data['model_provider']
+        if 'model_api_url' in data:
+            agent.model_api_url = data['model_api_url']
+        if 'model_api_key' in data:
+            agent.model_api_key = data['model_api_key']
+        if 'model_temperature' in data:
+            agent.model_temperature = data['model_temperature']
+        if 'model_max_tokens' in data:
+            agent.model_max_tokens = data['model_max_tokens']
         
         # 提交更新
         db.session.commit()
@@ -187,6 +220,123 @@ def update_agent_status(agent_id):
         db.session.commit()
         
         return jsonify({'message': 'Agent status updated successfully', 'agent': agent.to_dict()}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/agents/<int:agent_id>/conversations', methods=['POST'])
+def create_conversation(agent_id):
+    """创建新会话"""
+    try:
+        agent = Agent.query.get_or_404(agent_id)
+        
+        # 生成唯一会话ID
+        conversation_id = str(uuid.uuid4())
+        
+        # 创建新会话
+        conversation = Conversation(
+            agent_id=agent.id,
+            conversation_id=conversation_id
+        )
+        
+        db.session.add(conversation)
+        db.session.commit()
+        
+        # 添加日志
+        log = AgentLog(
+            agent_id=agent.id,
+            level='info',
+            message=f'Conversation "{conversation_id}" created for agent "{agent.name}"'
+        )
+        db.session.add(log)
+        db.session.commit()
+        
+        return jsonify({'message': 'Conversation created successfully', 'conversation': conversation.to_dict()}), 201
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/agents/<int:agent_id>/conversations/<string:conversation_id>/messages', methods=['POST'])
+def send_message(agent_id, conversation_id):
+    """发送消息并获取智能体响应"""
+    try:
+        agent = Agent.query.get_or_404(agent_id)
+        conversation = Conversation.query.filter_by(agent_id=agent.id, conversation_id=conversation_id).first_or_404()
+        
+        data = request.get_json()
+        if not data or 'content' not in data:
+            return jsonify({'error': 'Content is required'}), 400
+        
+        # 添加用户消息
+        user_message = Message(
+            conversation_id=conversation.id,
+            role='user',
+            content=data['content']
+        )
+        db.session.add(user_message)
+        db.session.commit()
+        
+        # 获取会话历史
+        messages = Message.query.filter_by(conversation_id=conversation.id).order_by(Message.created_at).all()
+        
+        # 构建请求参数
+        request_data = {
+            'model': agent.model_name,
+            'messages': [{'role': msg.role, 'content': msg.content} for msg in messages],
+            'temperature': agent.model_temperature,
+            'max_tokens': agent.model_max_tokens
+        }
+        
+        # 发送请求到模型API
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        if agent.model_provider == 'openai' and agent.model_api_key:
+            headers['Authorization'] = f'Bearer {agent.model_api_key}'
+        
+        response = requests.post(f'{agent.model_api_url}/chat/completions', json=request_data, headers=headers)
+        response.raise_for_status()
+        
+        # 解析模型响应
+        response_data = response.json()
+        assistant_message_content = response_data['choices'][0]['message']['content']
+        
+        # 添加助手消息
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role='assistant',
+            content=assistant_message_content
+        )
+        db.session.add(assistant_message)
+        db.session.commit()
+        
+        # 添加日志
+        log = AgentLog(
+            agent_id=agent.id,
+            level='info',
+            message=f'Message exchanged in conversation "{conversation_id}" for agent "{agent.name}"'
+        )
+        db.session.add(log)
+        db.session.commit()
+        
+        return jsonify({'message': 'Message sent successfully', 'response': assistant_message_content}), 200
+        
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Model API error: {str(e)}'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/agents/<int:agent_id>/conversations/<string:conversation_id>/messages', methods=['GET'])
+def get_conversation_messages(agent_id, conversation_id):
+    """获取会话历史消息"""
+    try:
+        agent = Agent.query.get_or_404(agent_id)
+        conversation = Conversation.query.filter_by(agent_id=agent.id, conversation_id=conversation_id).first_or_404()
+        
+        # 获取会话历史
+        messages = Message.query.filter_by(conversation_id=conversation.id).order_by(Message.created_at).all()
+        
+        return jsonify({'messages': [msg.to_dict() for msg in messages]}), 200
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
