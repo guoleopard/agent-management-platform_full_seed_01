@@ -62,7 +62,14 @@ def create_agent():
             model_api_url=data.get('model_api_url', 'http://localhost:11434/v1'),
             model_api_key=data.get('model_api_key'),
             model_temperature=data.get('model_temperature', 0.7),
-            model_max_tokens=data.get('model_max_tokens', 2048)
+            model_max_tokens=data.get('model_max_tokens', 2048),
+            model_top_p=data.get('model_top_p', 0.9),
+            model_top_k=data.get('model_top_k', 40),
+            model_presence_penalty=data.get('model_presence_penalty', 0.0),
+            model_frequency_penalty=data.get('model_frequency_penalty', 0.0),
+            model_stop_sequences=data.get('model_stop_sequences'),
+            model_context_window=data.get('model_context_window', 4096),
+            model_system_prompt=data.get('model_system_prompt')
         )
         
         # 添加到数据库
@@ -148,6 +155,20 @@ def update_agent(agent_id):
             agent.model_temperature = data['model_temperature']
         if 'model_max_tokens' in data:
             agent.model_max_tokens = data['model_max_tokens']
+        if 'model_top_p' in data:
+            agent.model_top_p = data['model_top_p']
+        if 'model_top_k' in data:
+            agent.model_top_k = data['model_top_k']
+        if 'model_presence_penalty' in data:
+            agent.model_presence_penalty = data['model_presence_penalty']
+        if 'model_frequency_penalty' in data:
+            agent.model_frequency_penalty = data['model_frequency_penalty']
+        if 'model_stop_sequences' in data:
+            agent.model_stop_sequences = data['model_stop_sequences']
+        if 'model_context_window' in data:
+            agent.model_context_window = data['model_context_window']
+        if 'model_system_prompt' in data:
+            agent.model_system_prompt = data['model_system_prompt']
         
         # 提交更新
         db.session.commit()
@@ -284,8 +305,16 @@ def send_message(agent_id, conversation_id):
             'model': agent.model_name,
             'messages': [{'role': msg.role, 'content': msg.content} for msg in messages],
             'temperature': agent.model_temperature,
-            'max_tokens': agent.model_max_tokens
+            'max_tokens': agent.model_max_tokens,
+            'top_p': agent.model_top_p,
+            'top_k': agent.model_top_k,
+            'presence_penalty': agent.model_presence_penalty,
+            'frequency_penalty': agent.model_frequency_penalty
         }
+        
+        # 添加停止序列（如果有的话）
+        if agent.model_stop_sequences:
+            request_data['stop'] = agent.model_stop_sequences.split(',')
         
         # 发送请求到模型API
         headers = {
@@ -338,6 +367,128 @@ def get_conversation_messages(agent_id, conversation_id):
         
         return jsonify({'messages': [msg.to_dict() for msg in messages]}), 200
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/agents/<int:agent_id>/chat', methods=['POST'])
+def chat_with_agent(agent_id):
+    """直接与智能体对话（自动管理会话）"""
+    try:
+        agent = Agent.query.get_or_404(agent_id)
+        
+        data = request.get_json()
+        if not data or 'content' not in data:
+            return jsonify({'error': 'Content is required'}), 400
+        
+        # 获取或创建会话
+        conversation_id = data.get('conversation_id')
+        if conversation_id:
+            conversation = Conversation.query.filter_by(agent_id=agent.id, conversation_id=conversation_id).first()
+            if not conversation:
+                return jsonify({'error': 'Conversation not found'}), 404
+        else:
+            # 创建新会话
+            conversation_id = str(uuid.uuid4())
+            conversation = Conversation(
+                agent_id=agent.id,
+                conversation_id=conversation_id
+            )
+            db.session.add(conversation)
+            db.session.commit()
+            
+            # 添加日志
+            log = AgentLog(
+                agent_id=agent.id,
+                level='info',
+                message=f'Conversation "{conversation_id}" created for agent "{agent.name}" via chat API'
+            )
+            db.session.add(log)
+            db.session.commit()
+        
+        # 添加用户消息
+        user_message = Message(
+            conversation_id=conversation.id,
+            role='user',
+            content=data['content']
+        )
+        db.session.add(user_message)
+        db.session.commit()
+        
+        # 获取会话历史
+        messages = Message.query.filter_by(conversation_id=conversation.id).order_by(Message.created_at).all()
+        
+        # 如果有系统提示词，确保它是第一条消息
+        if agent.model_system_prompt:
+            # 检查是否已经有系统消息
+            has_system_message = any(msg.role == 'system' for msg in messages)
+            if not has_system_message:
+                # 在消息列表开头插入系统提示词
+                system_message = Message(
+                    conversation_id=conversation.id,
+                    role='system',
+                    content=agent.model_system_prompt
+                )
+                db.session.add(system_message)
+                db.session.commit()
+                # 重新获取消息列表
+                messages = Message.query.filter_by(conversation_id=conversation.id).order_by(Message.created_at).all()
+        
+        # 构建请求参数
+        request_data = {
+            'model': agent.model_name,
+            'messages': [{'role': msg.role, 'content': msg.content} for msg in messages],
+            'temperature': agent.model_temperature,
+            'max_tokens': agent.model_max_tokens,
+            'top_p': agent.model_top_p,
+            'top_k': agent.model_top_k,
+            'presence_penalty': agent.model_presence_penalty,
+            'frequency_penalty': agent.model_frequency_penalty
+        }
+        
+        # 添加停止序列（如果有的话）
+        if agent.model_stop_sequences:
+            request_data['stop'] = agent.model_stop_sequences.split(',')
+        
+        # 发送请求到模型API
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        if agent.model_provider == 'openai' and agent.model_api_key:
+            headers['Authorization'] = f'Bearer {agent.model_api_key}'
+        
+        response = requests.post(f'{agent.model_api_url}/chat/completions', json=request_data, headers=headers)
+        response.raise_for_status()
+        
+        # 解析模型响应
+        response_data = response.json()
+        assistant_message_content = response_data['choices'][0]['message']['content']
+        
+        # 添加助手消息
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role='assistant',
+            content=assistant_message_content
+        )
+        db.session.add(assistant_message)
+        db.session.commit()
+        
+        # 添加日志
+        log = AgentLog(
+            agent_id=agent.id,
+            level='info',
+            message=f'Message exchanged in conversation "{conversation_id}" for agent "{agent.name}" via chat API'
+        )
+        db.session.add(log)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Message sent successfully',
+            'response': assistant_message_content,
+            'conversation_id': conversation_id
+        }), 200
+        
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Model API error: {str(e)}'}), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
