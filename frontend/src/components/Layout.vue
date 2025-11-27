@@ -19,6 +19,14 @@
           <el-icon><Plus /></el-icon>
           <span>Agent管理</span>
         </el-menu-item>
+        <el-menu-item index="users">
+          <el-icon><User /></el-icon>
+          <span>用户管理</span>
+        </el-menu-item>
+        <el-menu-item index="roles">
+          <el-icon><UserFilled /></el-icon>
+          <span>角色管理</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 
@@ -50,7 +58,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ChatDotRound, Setting, Plus, User } from '@element-plus/icons-vue'
+import { ChatDotRound, Setting, Plus, User, UserFilled } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const route = useRoute()
