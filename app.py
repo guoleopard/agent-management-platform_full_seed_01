@@ -129,6 +129,15 @@ chat_model = api.model('Chat', {
     'conversation_id': fields.String(description='会话ID（可选）')
 })
 
+# 调用智能体请求模型
+invoke_agent_model = api.model('InvokeAgent', {
+    'input': fields.String(required=True, description='输入内容'),
+    'conversation_id': fields.String(description='会话ID（可选）'),
+    'stream': fields.Boolean(description='是否流式响应', default=False),
+    'temperature': fields.Float(description='温度参数（覆盖智能体配置）'),
+    'max_tokens': fields.Integer(description='最大tokens（覆盖智能体配置）')
+})
+
 # 配置数据库
 DB_TYPE = os.getenv('DB_TYPE', 'sqlite')
 
@@ -510,6 +519,144 @@ class AgentChat(Resource):
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
+@ns_agents.route('/<int:agent_id>/invoke')
+@ns_agents.response(404, 'Agent not found')
+@ns_agents.param('agent_id', '智能体ID')
+class AgentInvoke(Resource):
+    @ns_agents.doc('invoke_agent')
+    @ns_agents.expect(invoke_agent_model)
+    def post(self, agent_id):
+        """调用智能体（支持灵活的会话管理和参数配置）"""
+        try:
+            agent = Agent.query.get_or_404(agent_id)
+            
+            data = request.get_json()
+            if not data or 'input' not in data:
+                return jsonify({'error': 'Input is required'}), 400
+            
+            # 获取或创建会话
+            conversation_id = data.get('conversation_id')
+            if conversation_id:
+                conversation = Conversation.query.filter_by(agent_id=agent.id, conversation_id=conversation_id).first()
+                if not conversation:
+                    return jsonify({'error': 'Conversation not found'}), 404
+            else:
+                # 创建新会话
+                conversation_id = str(uuid.uuid4())
+                conversation = Conversation(
+                    agent_id=agent.id,
+                    conversation_id=conversation_id
+                )
+                db.session.add(conversation)
+                db.session.commit()
+                
+                # 添加日志
+                log = AgentLog(
+                    agent_id=agent.id,
+                    level='info',
+                    message=f'Conversation "{conversation_id}" created for agent "{agent.name}" via invoke API' 
+                )
+                db.session.add(log)
+                db.session.commit()
+            
+            # 添加用户消息
+            user_message = Message(
+                conversation_id=conversation.id,
+                role='user',
+                content=data['input']
+            )
+            db.session.add(user_message)
+            db.session.commit()
+            
+            # 获取会话历史
+            messages = Message.query.filter_by(conversation_id=conversation.id).order_by(Message.created_at).all()
+            
+            # 如果有系统提示词，确保它是第一条消息
+            if agent.model_system_prompt:
+                # 检查是否已经有系统消息
+                has_system_message = any(msg.role == 'system' for msg in messages)
+                if not has_system_message:
+                    # 在消息列表开头插入系统提示词
+                    system_message = Message(
+                        conversation_id=conversation.id,
+                        role='system',
+                        content=agent.model_system_prompt
+                    )
+                    db.session.add(system_message)
+                    db.session.commit()
+                    # 重新获取消息列表
+                    messages = Message.query.filter_by(conversation_id=conversation.id).order_by(Message.created_at).all()
+            
+            # 构建请求参数，支持覆盖智能体配置
+            request_data = {
+                'model': agent.model_name,
+                'messages': [{'role': msg.role, 'content': msg.content} for msg in messages],
+                'temperature': data.get('temperature', agent.model_temperature),
+                'max_tokens': data.get('max_tokens', agent.model_max_tokens),
+                'top_p': agent.model_top_p,
+                'top_k': agent.model_top_k,
+                'presence_penalty': agent.model_presence_penalty,
+                'frequency_penalty': agent.model_frequency_penalty
+            }
+            
+            # 添加停止序列（如果有的话）
+            if agent.model_stop_sequences:
+                request_data['stop'] = agent.model_stop_sequences.split(',')
+            
+            # 发送请求到模型API
+            headers = {
+                'Content-Type': 'application/json'
+            }
+            if agent.model_provider == 'openai' and agent.model_api_key:
+                headers['Authorization'] = f'Bearer {agent.model_api_key}'
+            
+            response = requests.post(f'{agent.model_api_url}/chat/completions', json=request_data, headers=headers)
+            response.raise_for_status()
+            
+            # 解析模型响应
+            response_data = response.json()
+            assistant_message_content = response_data['choices'][0]['message']['content']
+            
+            # 添加助手消息
+            assistant_message = Message(
+                conversation_id=conversation.id,
+                role='assistant',
+                content=assistant_message_content
+            )
+            db.session.add(assistant_message)
+            db.session.commit()
+            
+            # 添加日志
+            log = AgentLog(
+                agent_id=agent.id,
+                level='info',
+                message=f'Agent "{agent.name}" invoked with input: {data["input"]}' 
+            )
+            db.session.add(log)
+            db.session.commit()
+            
+            # 构建响应
+            result = {
+                'success': True,
+                'output': assistant_message_content,
+                'conversation_id': conversation_id,
+                'metadata': {
+                    'agent_id': agent.id,
+                    'agent_name': agent.name,
+                    'model_name': agent.model_name,
+                    'temperature': request_data['temperature'],
+                    'max_tokens': request_data['max_tokens'],
+                    'created_at': datetime.utcnow().isoformat()
+                }
+            }
+            
+            return jsonify(result), 200
+            
+        except requests.exceptions.RequestException as e:
+            return jsonify({'error': f'Model API error: {str(e)}'}), 500
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
 @ns_agents.route('/<int:agent_id>/logs')
 @ns_agents.response(404, 'Agent not found')
 @ns_agents.param('agent_id', '智能体ID')
@@ -712,4 +859,4 @@ class LogList(Resource):
 
 if __name__ == '__main__':
     # 启动应用
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5001)
