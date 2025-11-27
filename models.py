@@ -18,6 +18,13 @@ class Agent(db.Model):
     model_api_key = db.Column(db.String(200), nullable=True)  # API密钥（OpenAI需要）
     model_temperature = db.Column(db.Float, nullable=False, default=0.7)  # 温度参数
     model_max_tokens = db.Column(db.Integer, nullable=False, default=2048)  # 最大 tokens
+    model_top_p = db.Column(db.Float, nullable=False, default=0.9)  # Top-p参数
+    model_top_k = db.Column(db.Integer, nullable=False, default=40)  # Top-k参数
+    model_presence_penalty = db.Column(db.Float, nullable=False, default=0.0)  # 存在惩罚
+    model_frequency_penalty = db.Column(db.Float, nullable=False, default=0.0)  # 频率惩罚
+    model_stop_sequences = db.Column(db.Text, nullable=True)  # 停止序列（用逗号分隔）
+    model_context_window = db.Column(db.Integer, nullable=False, default=4096)  # 上下文窗口大小
+    model_system_prompt = db.Column(db.Text, nullable=True)  # 系统提示词
     
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -37,8 +44,16 @@ class Agent(db.Model):
             'model_name': self.model_name,
             'model_provider': self.model_provider,
             'model_api_url': self.model_api_url,
+            'model_api_key': self.model_api_key,
             'model_temperature': self.model_temperature,
             'model_max_tokens': self.model_max_tokens,
+            'model_top_p': self.model_top_p,
+            'model_top_k': self.model_top_k,
+            'model_presence_penalty': self.model_presence_penalty,
+            'model_frequency_penalty': self.model_frequency_penalty,
+            'model_stop_sequences': self.model_stop_sequences.split(',') if self.model_stop_sequences else [],
+            'model_context_window': self.model_context_window,
+            'model_system_prompt': self.model_system_prompt,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat()
         }
