@@ -1,8 +1,75 @@
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # 初始化 SQLAlchemy 实例
 db = SQLAlchemy()
+
+# 用户角色关联表
+user_roles = db.Table('user_roles',
+    db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True),
+    db.Column('role_id', db.Integer, db.ForeignKey('role.id'), primary_key=True)
+)
+
+class User(db.Model):
+    """用户数据模型"""
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), nullable=False, unique=True)
+    email = db.Column(db.String(100), nullable=False, unique=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    full_name = db.Column(db.String(100), nullable=True)
+    phone = db.Column(db.String(20), nullable=True)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    is_admin = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # 建立与角色的多对多关系
+    roles = db.relationship('Role', secondary=user_roles, lazy='subquery',
+        backref=db.backref('users', lazy=True))
+    
+    def set_password(self, password):
+        """设置密码哈希"""
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        """验证密码"""
+        return check_password_hash(self.password_hash, password)
+    
+    def to_dict(self):
+        """将模型转换为字典格式"""
+        return {
+            'id': self.id,
+            'username': self.username,
+            'email': self.email,
+            'full_name': self.full_name,
+            'phone': self.phone,
+            'is_active': self.is_active,
+            'is_admin': self.is_admin,
+            'role_ids': [role.id for role in self.roles],
+            'role_names': [role.name for role in self.roles],
+            'created_at': self.created_at.isoformat(),
+            'updated_at': self.updated_at.isoformat()
+        }
+
+class Role(db.Model):
+    """角色数据模型"""
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False, unique=True)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def to_dict(self):
+        """将模型转换为字典格式"""
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'user_count': len(self.users),
+            'created_at': self.created_at.isoformat(),
+            'updated_at': self.updated_at.isoformat()
+        }
 
 class Agent(db.Model):
     """智能体数据模型"""
